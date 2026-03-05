@@ -1,441 +1,785 @@
 package main
 
 import (
-	"bufio"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"sync"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// --- Constants for Windows API ---
-const (
-	CW_USEDEFAULT   = 0x80000000
-	CS_VREDRAW      = 0x0001
-	CS_HREDRAW      = 0x0002
-	SW_HIDE         = 0
-	SW_SHOW         = 5
-	WM_DESTROY      = 0x0002
-	WM_PAINT        = 0x000F
-	WM_CREATE       = 0x0001
-	WM_COMMAND      = 0x0111
-	BTN_PUSHED      = 1
-	ID_BUTTON_START = 1001
-	ID_BUTTON_STOP  = 1002
-	ID_EDIT_FILE    = 2001
-	ID_STATIC_TXT   = 3001
+func init() {
+	runtime.LockOSThread()
+}
 
+const (
 	WS_OVERLAPPEDWINDOW = 0x00CF0000
 	WS_VISIBLE          = 0x10000000
 	WS_CHILD            = 0x40000000
-	WS_BORDER           = 0x00800000
-	WS_CAPTION          = 0x00C00000
-	WS_CLIPSIBLINGS     = 0x04000000
-	WS_CLIPCHILDREN     = 0x02000000
-	WS_DISABLED         = 0x08000000
-	WS_GROUP            = 0x00020000
 	WS_TABSTOP          = 0x00010000
-	WS_THICKFRAME       = 0x00040000
-	WS_POPUP            = 0x80000000
-	WS_SYSMENU          = 0x00080000
-	WS_MINIMIZEBOX      = 0x00020000
-	WS_MAXIMIZEBOX      = 0x00010000
+	WS_VSCROLL          = 0x00200000
+	ES_MULTILINE        = 0x0004
+	ES_AUTOVSCROLL      = 0x0040
+	ES_READONLY         = 0x0800
+	WS_EX_CLIENTEDGE    = 0x00000200
 
-	BS_PUSHBUTTON    = 0
-	BS_DEFPUSHBUTTON = 1
-	ES_AUTOHSCROLL   = 0x00000080
-	ES_MULTILINE     = 0x00000200
-	ES_WANTRETURN    = 0x00001000
+	WM_DESTROY = 0x0002
+	WM_COMMAND = 0x0111
+	WM_SETTEXT = 0x000C
+	WM_GETTEXT = 0x000D
+	WM_TIMER   = 0x0113
+	WM_CREATE  = 0x0001
+	WM_KEYDOWN = 0x0100
+	WM_KEYUP   = 0x0101
 
-	WM_USER = 0x0400
+	EM_SETSEL     = 0x00B1
+	EM_REPLACESEL = 0x00C2
+	EM_SCROLL     = 0x00B5
+	SB_BOTTOM     = 7
+
+	SW_SHOWNORMAL = 1
+
+	ID_BUTTON_START  = 1001
+	ID_BUTTON_BROWSE = 1003
+	ID_BUTTON_DUMP   = 1004
+	ID_EDIT_PATH     = 2002
+	ID_LOG_BOX       = 2003
+	ID_PROCESS_LABEL = 2004
+
+	CS_VREDRAW = 0x0001
+	CS_HREDRAW = 0x0002
+
+	OFN_FILEMUSTEXIST = 0x00001000
+	OFN_PATHMUSTEXIST = 0x00000800
+	OFN_HIDEREADONLY  = 0x00000004
+	OFN_EXPLORER      = 0x00080000
+
+	EN_CHANGE = 0x0300
+
+	TIMER_ID         = 42
+	TIMER_PROCESS_ID = 43
+
+	COINIT_APARTMENTTHREADED = 0x2
+
+	TH32CS_SNAPPROCESS = 0x00000002
+
+	INPUT_KEYBOARD    = 1
+	KEYEVENTF_KEYUP   = 0x0002
+	KEYEVENTF_UNICODE = 0x0004
+
+	VK_R = 0x52
+
+	SW_RESTORE  = 9
+	SW_MINIMIZE = 6
 )
 
 var (
-	user32DLL   = windows.NewLazySystemDLL("user32.dll")
-	kernel32DLL = windows.NewLazySystemDLL("kernel32.dll")
+	user32   = windows.NewLazySystemDLL("user32.dll")
+	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
+	comdlg32 = windows.NewLazySystemDLL("comdlg32.dll")
+	ole32    = windows.NewLazySystemDLL("ole32.dll")
 
-	procCreateWindowExA     = user32DLL.NewProc("CreateWindowExA")
-	procRegisterClassA      = user32DLL.NewProc("RegisterClassExA")
-	procPostQuitMessage     = user32DLL.NewProc("PostQuitMessage")
-	procDispatchMessageA    = user32DLL.NewProc("DispatchMessageA")
-	procGetMessageA         = user32DLL.NewProc("GetMessageA")
-	procTranslateMessage    = user32DLL.NewProc("TranslateMessage")
-	procSendMessageA        = user32DLL.NewProc("SendMessageA")
-	procFindWindowA         = user32DLL.NewProc("FindWindowA")
-	procSetForegroundWindow = user32DLL.NewProc("SetForegroundWindow")
-	procSendInput           = user32DLL.NewProc("SendInput")
-	procShowWindow          = user32DLL.NewProc("ShowWindow")
-	procUpdateWindow        = user32DLL.NewProc("UpdateWindow")
-	procKillTimer           = user32DLL.NewProc("KillTimer")
-	procSetTimer            = user32DLL.NewProc("SetTimer")
-	procDefWindowProcA      = user32DLL.NewProc("DefWindowProcA")
-
-	procGetModuleHandleA = kernel32DLL.NewProc("GetModuleHandleA")
+	procCreateWindowExW          = user32.NewProc("CreateWindowExW")
+	procRegisterClassExW         = user32.NewProc("RegisterClassExW")
+	procDefWindowProcW           = user32.NewProc("DefWindowProcW")
+	procDispatchMessageW         = user32.NewProc("DispatchMessageW")
+	procGetMessageW              = user32.NewProc("GetMessageW")
+	procTranslateMessage         = user32.NewProc("TranslateMessage")
+	procPostQuitMessage          = user32.NewProc("PostQuitMessage")
+	procSendMessageW             = user32.NewProc("SendMessageW")
+	procShowWindow               = user32.NewProc("ShowWindow")
+	procUpdateWindow             = user32.NewProc("UpdateWindow")
+	procGetModuleHandleW         = kernel32.NewProc("GetModuleHandleW")
+	procGetOpenFileNameW         = comdlg32.NewProc("GetOpenFileNameW")
+	procCommDlgExtError          = comdlg32.NewProc("CommDlgExtendedError")
+	procEnableWindow             = user32.NewProc("EnableWindow")
+	procSetTimer                 = user32.NewProc("SetTimer")
+	procKillTimer                = user32.NewProc("KillTimer")
+	procCoInitializeEx           = ole32.NewProc("CoInitializeEx")
+	procCoUninitialize           = ole32.NewProc("CoUninitialize")
+	shell32                      = windows.NewLazySystemDLL("shell32.dll")
+	procShellExecuteW            = shell32.NewProc("ShellExecuteW")
+	procCreateToolhelp32Snapshot = kernel32.NewProc("CreateToolhelp32Snapshot")
+	procProcess32FirstW          = kernel32.NewProc("Process32FirstW")
+	procProcess32NextW           = kernel32.NewProc("Process32NextW")
+	procCloseHandle              = kernel32.NewProc("CloseHandle")
+	procFindWindowW              = user32.NewProc("FindWindowW")
+	procSetForegroundWindow      = user32.NewProc("SetForegroundWindow")
+	procSendInput                = user32.NewProc("SendInput")
+	procGetForegroundWindow      = user32.NewProc("GetForegroundWindow")
+	procInvalidateRect           = user32.NewProc("InvalidateRect")
+	procPostMessageW             = user32.NewProc("PostMessageW")
+	procAttachThreadInput        = user32.NewProc("AttachThreadInput")
+	procGetWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
+	procGetCurrentThreadId       = kernel32.NewProc("GetCurrentThreadId")
+	procBringWindowToTop         = user32.NewProc("BringWindowToTop")
 )
 
-type Window struct {
-	hwnd      HWND
-	filePath  string
-	isRunning bool
-	cancelCtx context.Context // We need context, so we import it
-	ctxCancel context.CancelFunc
+type WNDCLASSEX struct {
+	CbSize        uint32
+	Style         uint32
+	LpfnWndProc   uintptr
+	CbClsExtra    int32
+	CbWndExtra    int32
+	HInstance     uintptr
+	HIcon         uintptr
+	HCursor       uintptr
+	HbrBackground uintptr
+	LpszMenuName  *uint16
+	LpszClassName *uint16
+	HIconSm       uintptr
 }
 
-// Global state for the worker goroutine
-var globalState = struct {
-	mu       sync.Mutex
-	isActive bool
-	cancel   context.CancelFunc
-}{isActive: false}
+type OPENFILENAME struct {
+	LStructSize       uint32
+	HwndOwner         uintptr
+	HInstance         uintptr
+	LpstrFilter       *uint16
+	LpstrCustomFilter *uint16
+	NMaxCustFilter    uint32
+	NFilerIndex       uint32
+	LpstrFile         *uint16
+	NMaxFile          uint32
+	LpstrFileTitle    *uint16
+	NMaxFileTitle     uint32
+	LpstrInitialDir   *uint16
+	LpstrTitle        *uint16
+	Flags             uint32
+	NFileOffset       uint16
+	NFileExtension    uint16
+	LpstrDefExt       *uint16
+	LCustData         uintptr
+	LpfnHook          uintptr
+	LpTemplateName    *uint16
+	PvReserved        uintptr
+	DwReserved        uint32
+	FlagsEx           uint32
+}
 
-// --- Input Simulation Structures ---
-type INPUT struct {
-	Type  uint32
-	Union unsafe.Pointer
+type MSG struct {
+	Hwnd    uintptr
+	Message uint32
+	WParam  uintptr
+	LParam  uintptr
+	Time    uint32
+	Pt      struct{ X, Y int32 }
+}
+
+type PROCESSENTRY32W struct {
+	DwSize              uint32
+	CntUsage            uint32
+	Th32ProcessID       uint32
+	Th32DefaultHeapID   uintptr
+	Th32ModuleID        uint32
+	CntThreads          uint32
+	Th32ParentProcessID uint32
+	PcPriClassBase      int32
+	DwFlags             uint32
+	SzExeFile           [260]uint16
 }
 
 type KEYBDINPUT struct {
-	Vk          uint16
-	Scan        uint16
-	Flags       uint32
+	WVk         uint16
+	WScan       uint16
+	DwFlags     uint32
 	Time        uint32
 	DwExtraInfo uintptr
 }
 
-const INPUT_KEYBOARD = 1
-const KEYEVENTF_KEYUP = 0x0002
+type rawInput [40]byte
 
-func sendKeyR() {
-	var inputs [2]INPUT
-	keyDown := KEYBDINPUT{Vk: 0x52} // R key virtual code
-	inputs[0].Type = INPUT_KEYBOARD
-	inputs[0].Union = (*KEYBDINPUT)(unsafe.Pointer(&keyDown))
+func makeKeyInput(vk uint16, flags uint32) rawInput {
+	var r rawInput
 
-	keyUp := KEYBDINPUT{Vk: 0x52, Flags: KEYEVENTF_KEYUP}
-	inputs[1].Type = INPUT_KEYBOARD
-	inputs[1].Union = (*KEYBDINPUT)(unsafe.Pointer(&keyUp))
+	*(*uint32)(unsafe.Pointer(&r[0])) = INPUT_KEYBOARD
 
-	ret, _, _ := procSendInput.Call(
-		uintptr(len(inputs)),
-		uintptr(unsafe.Pointer(&inputs[0])),
-		uintptr(unsafe.Sizeof(INPUT{})),
+	*(*uint16)(unsafe.Pointer(&r[8])) = vk
+	*(*uint32)(unsafe.Pointer(&r[12])) = flags
+	return r
+}
+
+type Window struct {
+	hwnd           uintptr
+	filePath       string
+	logHwnd        uintptr
+	pathEditHwnd   uintptr
+	startBtnHwnd   uintptr
+	browseBtnHwnd  uintptr
+	dumpBtnHwnd    uintptr
+	processLblHwnd uintptr
+	instance       uintptr
+	isRunning      bool
+	gameRunning    bool
+}
+
+var gw *Window
+
+var wndProcCallback uintptr
+
+func init() {
+	wndProcCallback = windows.NewCallback(wndProc)
+}
+
+func isProcessRunning(substr string) bool {
+	hSnap, _, _ := procCreateToolhelp32Snapshot.Call(TH32CS_SNAPPROCESS, 0)
+	if hSnap == ^uintptr(0) {
+		logLine("ERROR: CreateToolhelp32Snapshot failed.")
+		return false
+	}
+	defer procCloseHandle.Call(hSnap)
+
+	var pe PROCESSENTRY32W
+	pe.DwSize = uint32(unsafe.Sizeof(pe))
+
+	ret, _, _ := procProcess32FirstW.Call(hSnap, uintptr(unsafe.Pointer(&pe)))
+	for ret != 0 {
+		name := strings.ToLower(windows.UTF16ToString(pe.SzExeFile[:]))
+		if strings.Contains(name, substr) {
+			return true
+		}
+		ret, _, _ = procProcess32NextW.Call(hSnap, uintptr(unsafe.Pointer(&pe)))
+	}
+	return false
+}
+
+func logAllProcesses() {
+	hSnap, _, _ := procCreateToolhelp32Snapshot.Call(TH32CS_SNAPPROCESS, 0)
+	if hSnap == ^uintptr(0) {
+		logLine("ERROR: Cannot snapshot processes.")
+		return
+	}
+	defer procCloseHandle.Call(hSnap)
+
+	var pe PROCESSENTRY32W
+	pe.DwSize = uint32(unsafe.Sizeof(pe))
+
+	var names []string
+	ret, _, _ := procProcess32FirstW.Call(hSnap, uintptr(unsafe.Pointer(&pe)))
+	for ret != 0 {
+		name := windows.UTF16ToString(pe.SzExeFile[:])
+		names = append(names, name)
+		ret, _, _ = procProcess32NextW.Call(hSnap, uintptr(unsafe.Pointer(&pe)))
+	}
+	logLine("Running processes (%d total):", len(names))
+	for _, n := range names {
+		logLine("  %s", n)
+	}
+}
+
+func checkProcess() {
+	hwnd, _, _ := procFindWindowW.Call(
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("ArcheAge"))), 0)
+	running := hwnd != 0
+	if running == gw.gameRunning {
+		return
+	}
+	gw.gameRunning = running
+
+	if running {
+		setCtrlText(gw.processLblHwnd, "ArcheAge: ● Running")
+		logLine("ArcheAge process detected.")
+		enableCtrl(gw.browseBtnHwnd, true)
+		enableCtrl(gw.startBtnHwnd, gw.filePath != "")
+	} else {
+		setCtrlText(gw.processLblHwnd, "ArcheAge: ○ Not Running")
+		logLine("ArcheAge process not found.")
+		if gw.isRunning {
+			doStop()
+		}
+		enableCtrl(gw.startBtnHwnd, false)
+		enableCtrl(gw.browseBtnHwnd, false)
+	}
+}
+
+var (
+	procEnumWindows      = user32.NewProc("EnumWindows")
+	procGetWindowTextW   = user32.NewProc("GetWindowTextW")
+	procGetWindowLongW   = user32.NewProc("GetWindowLongW")
+	procGetClassNameW    = user32.NewProc("GetClassNameW")
+	procEnumChildWindows = user32.NewProc("EnumChildWindows")
+)
+
+var foundHwnd uintptr
+
+var enumTopCallback uintptr
+
+func init() {
+	enumTopCallback = windows.NewCallback(func(hwnd, lParam uintptr) uintptr {
+		buf := make([]uint16, 512)
+		procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), 512)
+		title := strings.ToLower(windows.UTF16ToString(buf))
+		search := strings.ToLower(windows.UTF16ToString((*[256]uint16)(unsafe.Pointer(lParam))[:]))
+		if strings.Contains(title, search) {
+			foundHwnd = hwnd
+			return 0
+		}
+		return 1
+	})
+}
+
+var enumChildCallback uintptr
+var foundChildHwnd uintptr
+
+func init() {
+	enumChildCallback = windows.NewCallback(func(hwnd, lParam uintptr) uintptr {
+
+		style, _, _ := procGetWindowLongW.Call(hwnd, uintptr(0xFFFFFFF0))
+		if style&WS_VISIBLE == 0 {
+			return 1
+		}
+		buf := make([]uint16, 256)
+		procGetClassNameW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), 256)
+		class := strings.ToLower(windows.UTF16ToString(buf))
+		logLine("  child hwnd=0x%X class=%s", hwnd, class)
+
+		if foundChildHwnd == 0 {
+			foundChildHwnd = hwnd
+		}
+		return 1
+	})
+}
+
+var allTopWindowsCallback uintptr
+
+func init() {
+	allTopWindowsCallback = windows.NewCallback(func(hwnd, lParam uintptr) uintptr {
+		titleBuf := make([]uint16, 256)
+		procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&titleBuf[0])), 256)
+		title := windows.UTF16ToString(titleBuf)
+
+		classBuf := make([]uint16, 256)
+		procGetClassNameW.Call(hwnd, uintptr(unsafe.Pointer(&classBuf[0])), 256)
+		class := windows.UTF16ToString(classBuf)
+
+		if title != "" {
+			logLine("  TOP hwnd=0x%X class=%q title=%q", hwnd, class, title)
+		}
+		return 1
+	})
+}
+
+func findArcheAgeWindow() uintptr {
+
+	hwnd, _, _ := procFindWindowW.Call(
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("ArcheAge"))),
+		0,
 	)
-	if ret == 0 {
-		fmt.Println("Failed to send input.")
+	if hwnd == 0 {
+		logLine("FindWindowW(class=ArcheAge) returned 0 — game window not found.")
+		return 0
 	}
+	logLine("Found game hwnd=0x%X via class=ArcheAge.", hwnd)
+	return hwnd
 }
 
-func findArcheageWindow() HWND {
-	// Try common names. Adjust if the actual window title differs.
-	// ArcheAge usually has "ArcheAge" or similar in the title.
-	names := []string{"ArcheAge", "ArcheAge - ", "ArcheAge.exe"}
-	for _, name := range names {
-		hwnd, _, _ := procFindWindowA.Call(
-			0,
-			StringToUTF16Ptr(name),
-		)
-		if hwnd != 0 {
-			return HWND(hwnd)
-		}
-	}
-	return 0
-}
-
-// --- Main Logic ---
-
-func main() {
-	// Get the directory of the executable
-	exePath, _ := os.Executable()
-	exeDir := filepath.Dir(exePath)
-	defaultFile := filepath.Join(exeDir, "actions.txt")
-
-	// Create the window
-	win := &Window{filePath: defaultFile}
-	go win.Run()
-
-	// Wait for exit (blocking call)
-	select {}
-}
-
-func (w *Window) Run() {
-	// Register Class
-	className := StringToUTF16Ptr("ArcheActionTool")
-	instance, _, _ := procGetModuleHandleA.Call(0)
-
-	wc := struct {
-		Style         uint32
-		CbClsExtra    int32
-		CbWndExtra    int32
-		HInstance     HINSTANCE
-		HIcon         HICON
-		HCursor       HCURSOR
-		HbrBackground HBRUSH
-		LpszMenuName  *uint16
-		LpszClassName *uint16
-		HIconSm       HICON
-	}{
-		Style:         CS_VREDRAW | CS_HREDRAW,
-		HInstance:     HINSTANCE(instance),
-		HbrBackground: 6, // COLOR_WINDOW + 1
-		LpszClassName: className,
-	}
-
-	_, _, _ = procRegisterClassA.Call(uintptr(unsafe.Pointer(&wc)))
-
-	// Create Window (Hidden initially, then shown minimized/overlay)
-	title := StringToUTF16Ptr("ArcheAgent Overlay")
-	hwnd, _, _ := procCreateWindowExA.Call(
-		0,
-		uintptr(unsafe.Pointer(className)),
-		uintptr(unsafe.Pointer(title)),
-		WS_OVERLAPPEDWINDOW|WS_VISIBLE,
-		CW_USEDEFAULT, CW_USEDEFAULT, 300, 150,
-		0, 0, HINSTANCE(instance), 0,
-	)
-
-	w.hwnd = hwnd
-
-	// Add Controls programmatically (Button, Edit Box)
-	// Button Start
-	procSendMessageA.Call(uintptr(hwnd), WM_CREATE, 0, 0)
-
-	// Simple layout: Button at bottom, Text box above
-	// We'll use SendMessage to create child controls
-	createChildControl(hwnd, ID_BUTTON_START, "Start", 20, 100, 100, 30)
-	createChildControl(hwnd, ID_BUTTON_STOP, "Stop", 130, 100, 100, 30)
-	createChildControl(hwnd, ID_EDIT_FILE, "", 20, 20, 260, 70)
-
-	// Set initial text in edit box
-	procSendMessageA.Call(uintptr(hwnd), WM_SETTEXT, 0, uintptr(unsafe.Pointer(StringToUTF16Ptr(defaultFile))))
-
-	// Show window (We can try to make it overlay-like by making it topmost or just visible)
-	procShowWindow.Call(uintptr(hwnd), SW_SHOWMINIMIZED)
-	// Note: True "overlay" (transparent/always on top) requires more complex registry/settings or setting WS_EX_TOPMOST.
-	// For now, we minimize it but keep it running.
-
-	// Message Loop
-	msg := struct {
-		Hwnd    HWND
-		Message uint32
-		WParam  uintptr
-		LParam  uintptr
-		Time    uint32
-		Pt      struct {
-			X int32
-			Y int32
-		}
-	}{}
-
-	for {
-		ret, _, _ := procGetMessageA.Call(
-			uintptr(unsafe.Pointer(&msg)),
-			0, 0, 0,
-		)
-		if ret <= 0 {
-			break
-		}
-		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
-		procDispatchMessageA.Call(uintptr(unsafe.Pointer(&msg)))
-	}
-}
-
-func createChildControl(parentHWND HWND, id int, text string, x, y, w, h int) {
-	textPtr := StringToUTF16Ptr(text)
-	style := BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP
-	if id == ID_EDIT_FILE {
-		style = ES_MULTILINE | ES_AUTOHSCROLL | WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP
-	}
-
-	hwnd, _, _ := procCreateWindowExA.Call(
-		0,
-		uintptr(unsafe.Pointer(StringToUTF16Ptr("BUTTON"))),
-		uintptr(unsafe.Pointer(textPtr)),
-		style,
-		x, y, w, h,
-		parentHWND,
-		HMENU(id),
-		0,
-		0,
-	)
-	_ = hwnd
-}
-
-// This function handles messages from the OS
-// In a real app, we'd parse WM_COMMAND here.
-// For simplicity in this snippet, we rely on a global timer or polling if needed,
-// but let's implement a basic message handler loop inside the Run function properly.
-// Actually, the above Run function is incomplete regarding message dispatching for buttons.
-// Let's refactor the Run to include a proper WndProc.
-
-// Re-implementing Run with a proper WndProc closure
-func (w *Window) RunWithWndProc() {
-	className := "ArcheActionTool"
-	instance, _, _ := procGetModuleHandleA.Call(0)
-
-	wc := struct {
-		Style         uint32
-		CbClsExtra    int32
-		CbWndExtra    int32
-		HInstance     HINSTANCE
-		HIcon         HICON
-		HCursor       HCURSOR
-		HbrBackground HBRUSH
-		LpszMenuName  *uint16
-		LpszClassName *uint16
-		HIconSm       HICON
-	}{
-		Style:         CS_VREDRAW | CS_HREDRAW,
-		HInstance:     HINSTANCE(instance),
-		HbrBackground: 6,
-		LpszClassName: StringToUTF16Ptr(className),
-	}
-	procRegisterClassA.Call(uintptr(unsafe.Pointer(&wc)))
-
-	hwnd, _, _ := procCreateWindowExA.Call(
-		0,
-		uintptr(unsafe.Pointer(StringToUTF16Ptr(className))),
-		uintptr(unsafe.Pointer(StringToUTF16Ptr("ArcheAgent"))),
-		WS_OVERLAPPEDWINDOW|WS_VISIBLE,
-		CW_USEDEFAULT, CW_USEDEFAULT, 300, 150,
-		0, 0, HINSTANCE(instance), 0,
-	)
-	w.hwnd = hwnd
-
-	// Create Controls
-	createChildControl(hwnd, ID_BUTTON_START, "Start", 20, 100, 100, 30)
-	createChildControl(hwnd, ID_BUTTON_STOP, "Stop", 130, 100, 100, 30)
-	createChildControl(hwnd, ID_EDIT_FILE, "", 20, 20, 260, 70)
-
-	// Initial File Path
-	initialPath := "actions.txt"
-	if exePath, err := os.Executable(); err == nil {
-		initialPath = filepath.Join(filepath.Dir(exePath), "actions.txt")
-	}
-	procSendMessageA.Call(uintptr(hwnd), WM_SETTEXT, 0, uintptr(unsafe.Pointer(StringToUTF16Ptr(initialPath))))
-
-	// Timer to check file changes or process?
-	// We will use a separate goroutine for reading the file.
-
-	// Message Loop
-	msg := struct {
-		Hwnd    HWND
-		Message uint32
-		WParam  uintptr
-		LParam  uintptr
-		Time    uint32
-		Pt      struct {
-			X int32
-			Y int32
-		}
-	}{}
-
-	for {
-		ret, _, _ := procGetMessageA.Call(
-			uintptr(unsafe.Pointer(&msg)),
-			0, 0, 0,
-		)
-		if ret <= 0 {
-			break
-		}
-
-		// Handle Commands (Buttons)
-		if msg.Message == WM_COMMAND {
-			id := int(msg.WParam & 0xFFFF)
-			if id == ID_BUTTON_START {
-				startProcessing(hwnd)
-			} else if id == ID_BUTTON_STOP {
-				stopProcessing()
-			}
-		}
-
-		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
-		procDispatchMessageA.Call(uintptr(unsafe.Pointer(&msg)))
-	}
-}
-
-func startProcessing(hwnd HWND) {
-	globalState.mu.Lock()
-	if globalState.isActive {
-		globalState.mu.Unlock()
+func sendRToArcheAge() {
+	gameHwnd := findArcheAgeWindow()
+	if gameHwnd == 0 {
+		logLine("WARNING: ArcheAge window not found.")
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	globalState.cancel = cancel
-	globalState.isActive = true
-	globalState.mu.Unlock()
-
 	go func() {
-		defer func() {
-			globalState.mu.Lock()
-			globalState.isActive = false
-			globalState.mu.Unlock()
-		}()
 
-		// Read file path from the control
-		// In a real app, we'd get the text from the edit control.
-		// For simplicity, assume "actions.txt" in current dir or pass it via global.
-		// Let's read the file "actions.txt" relative to exe.
-		exePath, _ := os.Executable()
-		filePath := filepath.Join(filepath.Dir(exePath), "actions.txt")
+		procShowWindow.Call(gw.hwnd, SW_MINIMIZE)
+		time.Sleep(100 * time.Millisecond)
 
-		file, err := os.Open(filePath)
-		if err != nil {
-			fmt.Printf("Error opening file: %v\n", err)
+		procShowWindow.Call(gameHwnd, SW_RESTORE)
+		procSetForegroundWindow.Call(gameHwnd)
+
+		deadline := time.Now().Add(1000 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			fg, _, _ := procGetForegroundWindow.Call()
+			if fg == gameHwnd {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		fg, _, _ := procGetForegroundWindow.Call()
+		logLine("Focused hwnd=0x%X game=0x%X match=%v", fg, gameHwnd, fg == gameHwnd)
+		if fg != gameHwnd {
+			logLine("ERROR: could not focus game window.")
 			return
 		}
-		defer file.Close()
 
-		scanner := bufio.NewScanner(file)
-		ticker := time.NewTicker(1 * time.Second) // Check every second
-		defer ticker.Stop()
+		time.Sleep(300 * time.Millisecond)
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				// Check if file has new content or just loop through lines?
-				// Requirement: "reads a txt file for an action string"
-				// Interpretation: If the file contains "action", press R.
-				// Or: Read line by line.
+		down := makeKeyInput(VK_R, 0)
+		up := makeKeyInput(VK_R, KEYEVENTF_KEYUP)
+		inputs := [2]rawInput{down, up}
 
-				file.Seek(0, 0)
-				scanner = bufio.NewScanner(file)
-				foundAction := false
-
-				for scanner.Scan() {
-					line := strings.TrimSpace(scanner.Text())
-					if strings.EqualFold(line, "action") || line == "r" || line == "press r" {
-						foundAction = true
-						break
-					}
-				}
-
-				if foundAction {
-					sendKeyR()
-					time.Sleep(200 * time.Millisecond) // Debounce
-				}
-			}
+		ret, _, err := procSendInput.Call(
+			2,
+			uintptr(unsafe.Pointer(&inputs[0])),
+			uintptr(len(inputs[0])),
+		)
+		if ret != 2 {
+			logLine("SendInput error: %v", err)
+		} else {
+			logLine("R sent successfully.")
 		}
 	}()
 }
 
-func stopProcessing() {
-	globalState.mu.Lock()
-	if !globalState.isActive {
-		globalState.mu.Unlock()
+func logLine(format string, args ...interface{}) {
+	if gw == nil || gw.logHwnd == 0 {
 		return
 	}
-	if globalState.cancel != nil {
-		globalState.cancel()
+	msg := fmt.Sprintf("[%s] %s\r\n",
+		time.Now().Format("15:04:05"),
+		fmt.Sprintf(format, args...))
+	ptr := windows.StringToUTF16Ptr(msg)
+	procSendMessageW.Call(gw.logHwnd, EM_SETSEL, ^uintptr(0), ^uintptr(0))
+	procSendMessageW.Call(gw.logHwnd, EM_REPLACESEL, 0, uintptr(unsafe.Pointer(ptr)))
+	procSendMessageW.Call(gw.logHwnd, EM_SCROLL, SB_BOTTOM, 0)
+}
+
+func setCtrlText(hwnd uintptr, text string) {
+	procSendMessageW.Call(hwnd, WM_SETTEXT, 0,
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(text))))
+}
+
+func getCtrlText(hwnd uintptr) string {
+	buf := make([]uint16, 1024)
+	procSendMessageW.Call(hwnd, WM_GETTEXT,
+		uintptr(len(buf)), uintptr(unsafe.Pointer(&buf[0])))
+	return windows.UTF16ToString(buf)
+}
+
+func enableCtrl(hwnd uintptr, enable bool) {
+	v := uintptr(0)
+	if enable {
+		v = 1
 	}
-	globalState.isActive = false
-	globalState.mu.Unlock()
+	procEnableWindow.Call(hwnd, v)
+}
+
+func scanFile() {
+	data, err := os.ReadFile(gw.filePath)
+	if err != nil {
+		logLine("ERROR reading file: %v", err)
+		doStop()
+		return
+	}
+
+	text := strings.ToLower(strings.TrimSpace(string(data)))
+
+	actionFound := false
+	stopFound := false
+
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "action" || strings.Contains(line, `action = "action"`) {
+			actionFound = true
+		}
+		if line == "stop" {
+			stopFound = true
+		}
+	}
+
+	if actionFound {
+		logLine("Action detected — sending R.")
+		sendRToArcheAge()
+		if err := os.WriteFile(gw.filePath, []byte(""), 0644); err != nil {
+			logLine("WARNING: could not clear file: %v", err)
+		} else {
+			logLine("File cleared.")
+		}
+	}
+
+	if stopFound {
+		doStop()
+	}
+}
+
+func doStart() {
+	if !gw.gameRunning {
+		logLine("Cannot start — ArcheAge is not running.")
+		return
+	}
+	logLine("Starting scan. File: %s", gw.filePath)
+	gw.isRunning = true
+	setCtrlText(gw.startBtnHwnd, "Stop")
+	procSetTimer.Call(gw.hwnd, TIMER_ID, 1000, 0)
+}
+
+func doStop() {
+	procKillTimer.Call(gw.hwnd, TIMER_ID)
+	gw.isRunning = false
+	setCtrlText(gw.startBtnHwnd, "Start")
+	logLine("Scan stopped.")
+}
+
+func openFileDialog(owner uintptr) string {
+	logLine("Opening file dialog...")
+
+	exe, err := os.Executable()
+	if err != nil {
+		exe, _ = os.Getwd()
+	} else {
+		exe = filepath.Dir(exe)
+	}
+
+	buf := make([]uint16, windows.MAX_PATH)
+	filter := utf16DoubleNull("Text Files", "*.txt", "All Files", "*.*")
+
+	ofn := OPENFILENAME{}
+	ofn.LStructSize = uint32(unsafe.Sizeof(ofn))
+	ofn.HwndOwner = owner
+	ofn.LpstrFilter = &filter[0]
+	ofn.LpstrFile = &buf[0]
+	ofn.NMaxFile = uint32(len(buf))
+	ofn.LpstrInitialDir = windows.StringToUTF16Ptr(exe)
+	ofn.LpstrTitle = windows.StringToUTF16Ptr("Select actions file")
+	ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_EXPLORER
+
+	logLine("Calling GetOpenFileNameW (struct=%d bytes)...", ofn.LStructSize)
+
+	ret, _, _ := procGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
+	if ret == 0 {
+		code, _, _ := procCommDlgExtError.Call()
+		if code == 0 {
+			logLine("Dialog cancelled.")
+		} else {
+			logLine("Dialog FAILED — CommDlgExtendedError: 0x%08X", code)
+		}
+		return ""
+	}
+
+	result := windows.UTF16ToString(buf)
+	logLine("Selected: %s", result)
+	return result
+}
+
+func utf16DoubleNull(pairs ...string) []uint16 {
+	var out []uint16
+	for _, s := range pairs {
+		out = append(out, windows.StringToUTF16(s)...)
+	}
+	out = append(out, 0)
+	return out
+}
+
+func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
+	switch msg {
+
+	case WM_CREATE:
+		buildControls(hwnd)
+
+		procSetTimer.Call(hwnd, TIMER_PROCESS_ID, 2000, 0)
+		return 0
+
+	case WM_TIMER:
+		switch wParam {
+		case TIMER_ID:
+			scanFile()
+		case TIMER_PROCESS_ID:
+			checkProcess()
+		}
+		return 0
+
+	case WM_COMMAND:
+		id := wParam & 0xFFFF
+		notif := (wParam >> 16) & 0xFFFF
+
+		switch id {
+		case ID_BUTTON_START:
+			if gw.isRunning {
+				doStop()
+			} else {
+				doStart()
+			}
+
+		case ID_BUTTON_DUMP:
+			logLine("--- Process dump requested ---")
+			logAllProcesses()
+
+		case ID_BUTTON_BROWSE:
+			logLine("Browse clicked.")
+			path := openFileDialog(hwnd)
+			if path != "" {
+				gw.filePath = path
+				setCtrlText(gw.pathEditHwnd, path)
+
+				if gw.gameRunning {
+					enableCtrl(gw.startBtnHwnd, true)
+				}
+				logLine("File set.")
+			}
+
+		case ID_EDIT_PATH:
+			if notif == EN_CHANGE {
+				text := strings.TrimSpace(getCtrlText(gw.pathEditHwnd))
+				gw.filePath = text
+
+				enableCtrl(gw.startBtnHwnd, text != "" && gw.gameRunning)
+			}
+		}
+		return 0
+
+	case WM_DESTROY:
+		logLine("Closing.")
+		procKillTimer.Call(hwnd, TIMER_ID)
+		procKillTimer.Call(hwnd, TIMER_PROCESS_ID)
+		procPostQuitMessage.Call(0)
+		return 0
+	}
+
+	r, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
+	return r
+}
+
+func buildControls(hwnd uintptr) {
+	inst := gw.instance
+
+	newLabel(hwnd, 12, 14, 68, 22, "File path:")
+	gw.pathEditHwnd = newEdit(hwnd, 82, 12, 300, 22, "")
+	gw.browseBtnHwnd = newButton(hwnd, inst, 390, 10, 128, 26, "Browse...", ID_BUTTON_BROWSE)
+
+	gw.processLblHwnd = newLabel(hwnd, 12, 52, 240, 22, "ArcheAge: ○ Checking...")
+	gw.startBtnHwnd = newButton(hwnd, inst, 260, 48, 100, 28, "Start", ID_BUTTON_START)
+	gw.dumpBtnHwnd = newButton(hwnd, inst, 368, 48, 150, 28, "Dump Processes", ID_BUTTON_DUMP)
+	enableCtrl(gw.startBtnHwnd, false)
+	enableCtrl(gw.browseBtnHwnd, false)
+
+	newLabel(hwnd, 12, 88, 100, 18, "Debug log:")
+	gw.logHwnd = newLogBox(hwnd, inst, 12, 108, 506, 300)
+}
+
+func isElevated() bool {
+	token := windows.Token(0)
+	err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token)
+	if err != nil {
+		return false
+	}
+	defer token.Close()
+	return token.IsElevated()
+}
+
+func relaunchAsAdmin() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	exePtr := windows.StringToUTF16Ptr(exe)
+	verbPtr := windows.StringToUTF16Ptr("runas")
+	procShellExecuteW.Call(0, uintptr(unsafe.Pointer(verbPtr)),
+		uintptr(unsafe.Pointer(exePtr)), 0, 0, SW_SHOWNORMAL)
+	os.Exit(0)
+}
+
+func main() {
+
+	if !isElevated() {
+		relaunchAsAdmin()
+		return
+	}
+
+	hr, _, _ := procCoInitializeEx.Call(0, COINIT_APARTMENTTHREADED)
+	if hr != 0 && hr != 1 {
+		fmt.Printf("CoInitializeEx failed: 0x%08X\n", hr)
+	}
+	defer procCoUninitialize.Call()
+
+	instance, _, _ := procGetModuleHandleW.Call(0)
+	gw = &Window{instance: instance}
+
+	className := windows.StringToUTF16Ptr("NehaFishingTool")
+
+	wc := WNDCLASSEX{
+		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
+		Style:         CS_VREDRAW | CS_HREDRAW,
+		LpfnWndProc:   wndProcCallback,
+		HInstance:     instance,
+		HbrBackground: 6,
+		LpszClassName: className,
+	}
+
+	ret, _, err := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+	if ret == 0 {
+		fmt.Printf("RegisterClassExW failed: %v\n", err)
+		return
+	}
+
+	hwnd, _, err := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(className)),
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("NehaFishing"))),
+		WS_OVERLAPPEDWINDOW|WS_VISIBLE,
+		200, 100, 560, 480,
+		0, 0, instance, 0,
+	)
+	if hwnd == 0 {
+		fmt.Printf("CreateWindowExW failed: %v\n", err)
+		return
+	}
+	gw.hwnd = hwnd
+
+	procShowWindow.Call(hwnd, SW_SHOWNORMAL)
+	procUpdateWindow.Call(hwnd)
+
+	logLine("ArcheAgent started. Waiting for ArcheAge process...")
+
+	var msg MSG
+	for {
+		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
+		if r == 0 || r == ^uintptr(0) {
+			break
+		}
+		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
+		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+	}
+}
+
+func newLabel(parent uintptr, x, y, w, h int, text string) uintptr {
+	hwnd, _, _ := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("STATIC"))),
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(text))),
+		WS_CHILD|WS_VISIBLE,
+		uintptr(x), uintptr(y), uintptr(w), uintptr(h),
+		parent, 0, 0, 0,
+	)
+	return hwnd
+}
+
+func newEdit(parent uintptr, x, y, w, h int, text string) uintptr {
+	hwnd, _, _ := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("EDIT"))),
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(text))),
+		WS_CHILD|WS_VISIBLE|WS_TABSTOP,
+		uintptr(x), uintptr(y), uintptr(w), uintptr(h),
+		parent, ID_EDIT_PATH, 0, 0,
+	)
+	return hwnd
+}
+
+func newLogBox(parent, instance uintptr, x, y, w, h int) uintptr {
+	hwnd, _, _ := procCreateWindowExW.Call(
+		WS_EX_CLIENTEDGE,
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("EDIT"))),
+		0,
+		WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY,
+		uintptr(x), uintptr(y), uintptr(w), uintptr(h),
+		parent, ID_LOG_BOX, instance, 0,
+	)
+	return hwnd
+}
+
+func newButton(parent, instance uintptr, x, y, w, h int, label string, id uintptr) uintptr {
+	hwnd, _, _ := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("BUTTON"))),
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(label))),
+		WS_CHILD|WS_VISIBLE|WS_TABSTOP,
+		uintptr(x), uintptr(y), uintptr(w), uintptr(h),
+		parent, id, instance, 0,
+	)
+	return hwnd
 }
