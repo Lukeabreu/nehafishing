@@ -43,12 +43,12 @@ const (
 
 	SW_SHOWNORMAL = 1
 
-	ID_BUTTON_START  = 1001
-	ID_BUTTON_BROWSE = 1003
-	ID_BUTTON_DUMP   = 1004
-	ID_EDIT_PATH     = 2002
-	ID_LOG_BOX       = 2003
-	ID_PROCESS_LABEL = 2004
+	ID_BUTTON_START    = 1001
+	ID_BUTTON_BROWSE   = 1003
+	ID_BUTTON_CLEARLOG = 1004
+	ID_EDIT_PATH       = 2002
+	ID_LOG_BOX         = 2003
+	ID_PROCESS_LABEL   = 2004
 
 	CS_VREDRAW = 0x0001
 	CS_HREDRAW = 0x0002
@@ -67,14 +67,12 @@ const (
 
 	TH32CS_SNAPPROCESS = 0x00000002
 
-	INPUT_KEYBOARD    = 1
-	KEYEVENTF_KEYUP   = 0x0002
-	KEYEVENTF_UNICODE = 0x0004
-
 	VK_R = 0x52
 
-	SW_RESTORE  = 9
-	SW_MINIMIZE = 6
+	SW_RESTORE = 9
+
+	// Target process name — only this exe is considered valid
+	ARCHEAGE_EXE = "archeage.exe"
 )
 
 var (
@@ -108,15 +106,8 @@ var (
 	procProcess32NextW           = kernel32.NewProc("Process32NextW")
 	procCloseHandle              = kernel32.NewProc("CloseHandle")
 	procFindWindowW              = user32.NewProc("FindWindowW")
-	procSetForegroundWindow      = user32.NewProc("SetForegroundWindow")
-	procSendInput                = user32.NewProc("SendInput")
-	procGetForegroundWindow      = user32.NewProc("GetForegroundWindow")
-	procInvalidateRect           = user32.NewProc("InvalidateRect")
 	procPostMessageW             = user32.NewProc("PostMessageW")
-	procAttachThreadInput        = user32.NewProc("AttachThreadInput")
 	procGetWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
-	procGetCurrentThreadId       = kernel32.NewProc("GetCurrentThreadId")
-	procBringWindowToTop         = user32.NewProc("BringWindowToTop")
 )
 
 type WNDCLASSEX struct {
@@ -182,38 +173,20 @@ type PROCESSENTRY32W struct {
 	SzExeFile           [260]uint16
 }
 
-type KEYBDINPUT struct {
-	WVk         uint16
-	WScan       uint16
-	DwFlags     uint32
-	Time        uint32
-	DwExtraInfo uintptr
-}
-
-type rawInput [40]byte
-
-func makeKeyInput(vk uint16, flags uint32) rawInput {
-	var r rawInput
-
-	*(*uint32)(unsafe.Pointer(&r[0])) = INPUT_KEYBOARD
-
-	*(*uint16)(unsafe.Pointer(&r[8])) = vk
-	*(*uint32)(unsafe.Pointer(&r[12])) = flags
-	return r
-}
+// KEYBDINPUT / rawInput / makeKeyInput removed — using PostMessage instead
 
 type Window struct {
-	hwnd           uintptr
-	filePath       string
-	logHwnd        uintptr
-	pathEditHwnd   uintptr
-	startBtnHwnd   uintptr
-	browseBtnHwnd  uintptr
-	dumpBtnHwnd    uintptr
-	processLblHwnd uintptr
-	instance       uintptr
-	isRunning      bool
-	gameRunning    bool
+	hwnd            uintptr
+	filePath        string
+	logHwnd         uintptr
+	pathEditHwnd    uintptr
+	startBtnHwnd    uintptr
+	browseBtnHwnd   uintptr
+	clearLogBtnHwnd uintptr
+	processLblHwnd  uintptr
+	instance        uintptr
+	isRunning       bool
+	gameRunning     bool
 }
 
 var gw *Window
@@ -224,6 +197,30 @@ func init() {
 	wndProcCallback = windows.NewCallback(wndProc)
 }
 
+// isArcheAgeRunning checks strictly for "archeage.exe" by exact process name.
+func isArcheAgeRunning() bool {
+	hSnap, _, _ := procCreateToolhelp32Snapshot.Call(TH32CS_SNAPPROCESS, 0)
+	if hSnap == ^uintptr(0) {
+		logLine("ERROR: CreateToolhelp32Snapshot failed.")
+		return false
+	}
+	defer procCloseHandle.Call(hSnap)
+
+	var pe PROCESSENTRY32W
+	pe.DwSize = uint32(unsafe.Sizeof(pe))
+
+	ret, _, _ := procProcess32FirstW.Call(hSnap, uintptr(unsafe.Pointer(&pe)))
+	for ret != 0 {
+		name := strings.ToLower(windows.UTF16ToString(pe.SzExeFile[:]))
+		if name == ARCHEAGE_EXE {
+			return true
+		}
+		ret, _, _ = procProcess32NextW.Call(hSnap, uintptr(unsafe.Pointer(&pe)))
+	}
+	return false
+}
+
+// isProcessRunning kept for generic use (e.g. dump), but game detection uses isArcheAgeRunning.
 func isProcessRunning(substr string) bool {
 	hSnap, _, _ := procCreateToolhelp32Snapshot.Call(TH32CS_SNAPPROCESS, 0)
 	if hSnap == ^uintptr(0) {
@@ -246,34 +243,10 @@ func isProcessRunning(substr string) bool {
 	return false
 }
 
-func logAllProcesses() {
-	hSnap, _, _ := procCreateToolhelp32Snapshot.Call(TH32CS_SNAPPROCESS, 0)
-	if hSnap == ^uintptr(0) {
-		logLine("ERROR: Cannot snapshot processes.")
-		return
-	}
-	defer procCloseHandle.Call(hSnap)
-
-	var pe PROCESSENTRY32W
-	pe.DwSize = uint32(unsafe.Sizeof(pe))
-
-	var names []string
-	ret, _, _ := procProcess32FirstW.Call(hSnap, uintptr(unsafe.Pointer(&pe)))
-	for ret != 0 {
-		name := windows.UTF16ToString(pe.SzExeFile[:])
-		names = append(names, name)
-		ret, _, _ = procProcess32NextW.Call(hSnap, uintptr(unsafe.Pointer(&pe)))
-	}
-	logLine("Running processes (%d total):", len(names))
-	for _, n := range names {
-		logLine("  %s", n)
-	}
-}
-
+// checkProcess now uses isArcheAgeRunning (exact match on archeage.exe) instead of
+// FindWindowW by class name, so it will not trigger on unrelated processes.
 func checkProcess() {
-	hwnd, _, _ := procFindWindowW.Call(
-		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("ArcheAge"))), 0)
-	running := hwnd != 0
+	running := isArcheAgeRunning()
 	if running == gw.gameRunning {
 		return
 	}
@@ -281,7 +254,7 @@ func checkProcess() {
 
 	if running {
 		setCtrlText(gw.processLblHwnd, "ArcheAge: ● Running")
-		logLine("ArcheAge process detected.")
+		logLine("ArcheAge process detected (archeage.exe).")
 		enableCtrl(gw.browseBtnHwnd, true)
 		enableCtrl(gw.startBtnHwnd, gw.filePath != "")
 	} else {
@@ -326,7 +299,6 @@ var foundChildHwnd uintptr
 
 func init() {
 	enumChildCallback = windows.NewCallback(func(hwnd, lParam uintptr) uintptr {
-
 		style, _, _ := procGetWindowLongW.Call(hwnd, uintptr(0xFFFFFFF0))
 		if style&WS_VISIBLE == 0 {
 			return 1
@@ -362,21 +334,90 @@ func init() {
 	})
 }
 
+// findArcheAgeWindow looks up the window belonging to archeage.exe specifically.
+// It first snapshots processes to get the PID of archeage.exe, then finds the
+// top-level window owned by that PID via EnumWindows.
 func findArcheAgeWindow() uintptr {
-
-	hwnd, _, _ := procFindWindowW.Call(
-		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("ArcheAge"))),
-		0,
-	)
-	if hwnd == 0 {
-		logLine("FindWindowW(class=ArcheAge) returned 0 — game window not found.")
+	// 1. Find PID of archeage.exe
+	hSnap, _, _ := procCreateToolhelp32Snapshot.Call(TH32CS_SNAPPROCESS, 0)
+	if hSnap == ^uintptr(0) {
+		logLine("ERROR: CreateToolhelp32Snapshot failed.")
 		return 0
 	}
-	logLine("Found game hwnd=0x%X via class=ArcheAge.", hwnd)
-	return hwnd
+	defer procCloseHandle.Call(hSnap)
+
+	var pe PROCESSENTRY32W
+	pe.DwSize = uint32(unsafe.Sizeof(pe))
+	var archeagePID uint32
+
+	ret, _, _ := procProcess32FirstW.Call(hSnap, uintptr(unsafe.Pointer(&pe)))
+	for ret != 0 {
+		name := strings.ToLower(windows.UTF16ToString(pe.SzExeFile[:]))
+		if name == ARCHEAGE_EXE {
+			archeagePID = pe.Th32ProcessID
+			break
+		}
+		ret, _, _ = procProcess32NextW.Call(hSnap, uintptr(unsafe.Pointer(&pe)))
+	}
+
+	if archeagePID == 0 {
+		logLine("archeage.exe not found in process list.")
+		return 0
+	}
+	logLine("Found archeage.exe PID=%d, searching for its window...", archeagePID)
+
+	// 2. Find the main window that belongs to that PID
+	type searchData struct {
+		pid  uint32
+		hwnd uintptr
+	}
+	sd := searchData{pid: archeagePID}
+
+	cb := windows.NewCallback(func(hwnd, lParam uintptr) uintptr {
+		data := (*searchData)(unsafe.Pointer(lParam))
+		var pid uint32
+		procGetWindowThreadProcessId.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+		if pid == data.pid {
+			// Only pick visible top-level windows
+			style, _, _ := procGetWindowLongW.Call(hwnd, uintptr(0xFFFFFFF0))
+			if style&WS_VISIBLE != 0 {
+				data.hwnd = hwnd
+				return 0 // stop enumeration
+			}
+		}
+		return 1
+	})
+
+	procEnumWindows.Call(cb, uintptr(unsafe.Pointer(&sd)))
+
+	if sd.hwnd == 0 {
+		logLine("No visible window found for archeage.exe (PID=%d).", archeagePID)
+		return 0
+	}
+	logLine("Found ArcheAge window hwnd=0x%X for PID=%d.", sd.hwnd, archeagePID)
+	return sd.hwnd
+}
+
+// postKeyToWindow sends WM_KEYDOWN + WM_KEYUP directly to the target window
+// handle via PostMessage — no focus stealing required.
+func postKeyToWindow(hwnd uintptr, vk uintptr) {
+	procMapVirtualKeyW := user32.NewProc("MapVirtualKeyW")
+	scan, _, _ := procMapVirtualKeyW.Call(vk, 0) // MAPVK_VK_TO_VSC
+
+	lParamDown := uintptr(1) | (scan << 16)
+	lParamUp := uintptr(1) | (scan << 16) | (1 << 30) | (1 << 31)
+
+	procPostMessageW.Call(hwnd, WM_KEYDOWN, vk, lParamDown)
+	time.Sleep(50 * time.Millisecond)
+	procPostMessageW.Call(hwnd, WM_KEYUP, vk, lParamUp)
 }
 
 func sendRToArcheAge() {
+	if !isArcheAgeRunning() {
+		logLine("WARNING: archeage.exe is not running. Skipping R key send.")
+		return
+	}
+
 	gameHwnd := findArcheAgeWindow()
 	if gameHwnd == 0 {
 		logLine("WARNING: ArcheAge window not found.")
@@ -384,45 +425,9 @@ func sendRToArcheAge() {
 	}
 
 	go func() {
-
-		procShowWindow.Call(gw.hwnd, SW_MINIMIZE)
-		time.Sleep(100 * time.Millisecond)
-
-		procShowWindow.Call(gameHwnd, SW_RESTORE)
-		procSetForegroundWindow.Call(gameHwnd)
-
-		deadline := time.Now().Add(1000 * time.Millisecond)
-		for time.Now().Before(deadline) {
-			fg, _, _ := procGetForegroundWindow.Call()
-			if fg == gameHwnd {
-				break
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-
-		fg, _, _ := procGetForegroundWindow.Call()
-		logLine("Focused hwnd=0x%X game=0x%X match=%v", fg, gameHwnd, fg == gameHwnd)
-		if fg != gameHwnd {
-			logLine("ERROR: could not focus game window.")
-			return
-		}
-
-		time.Sleep(300 * time.Millisecond)
-
-		down := makeKeyInput(VK_R, 0)
-		up := makeKeyInput(VK_R, KEYEVENTF_KEYUP)
-		inputs := [2]rawInput{down, up}
-
-		ret, _, err := procSendInput.Call(
-			2,
-			uintptr(unsafe.Pointer(&inputs[0])),
-			uintptr(len(inputs[0])),
-		)
-		if ret != 2 {
-			logLine("SendInput error: %v", err)
-		} else {
-			logLine("R sent successfully.")
-		}
+		logLine("Sending R via PostMessage to hwnd=0x%X (archeage.exe).", gameHwnd)
+		postKeyToWindow(gameHwnd, VK_R)
+		logLine("R sent successfully via PostMessage.")
 	}()
 }
 
@@ -469,26 +474,27 @@ func scanFile() {
 
 	text := strings.ToLower(strings.TrimSpace(string(data)))
 
-	actionFound := false
+	actionPending := false
 	stopFound := false
 
 	for _, raw := range strings.Split(text, "\n") {
 		line := strings.TrimSpace(raw)
-		if line == "action" || strings.Contains(line, `action = "action"`) {
-			actionFound = true
+		if line == "action:1" {
+			actionPending = true
 		}
 		if line == "stop" {
 			stopFound = true
 		}
 	}
 
-	if actionFound {
-		logLine("Action detected — sending R.")
+	if actionPending {
+		logLine("Action detected (action:1) — sending R.")
 		sendRToArcheAge()
-		if err := os.WriteFile(gw.filePath, []byte(""), 0644); err != nil {
-			logLine("WARNING: could not clear file: %v", err)
+		// Reset flag to 0 so Lua knows the action was consumed
+		if err := os.WriteFile(gw.filePath, []byte("action:0"), 0644); err != nil {
+			logLine("WARNING: could not reset action flag: %v", err)
 		} else {
-			logLine("File cleared.")
+			logLine("Action flag reset to action:0.")
 		}
 	}
 
@@ -499,7 +505,7 @@ func scanFile() {
 
 func doStart() {
 	if !gw.gameRunning {
-		logLine("Cannot start — ArcheAge is not running.")
+		logLine("Cannot start — ArcheAge (archeage.exe) is not running.")
 		return
 	}
 	logLine("Starting scan. File: %s", gw.filePath)
@@ -570,7 +576,6 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case WM_CREATE:
 		buildControls(hwnd)
-
 		procSetTimer.Call(hwnd, TIMER_PROCESS_ID, 2000, 0)
 		return 0
 
@@ -595,9 +600,9 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 				doStart()
 			}
 
-		case ID_BUTTON_DUMP:
-			logLine("--- Process dump requested ---")
-			logAllProcesses()
+		case ID_BUTTON_CLEARLOG:
+			setCtrlText(gw.logHwnd, "")
+			logLine("Log cleared.")
 
 		case ID_BUTTON_BROWSE:
 			logLine("Browse clicked.")
@@ -605,7 +610,6 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			if path != "" {
 				gw.filePath = path
 				setCtrlText(gw.pathEditHwnd, path)
-
 				if gw.gameRunning {
 					enableCtrl(gw.startBtnHwnd, true)
 				}
@@ -616,7 +620,6 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			if notif == EN_CHANGE {
 				text := strings.TrimSpace(getCtrlText(gw.pathEditHwnd))
 				gw.filePath = text
-
 				enableCtrl(gw.startBtnHwnd, text != "" && gw.gameRunning)
 			}
 		}
@@ -643,7 +646,7 @@ func buildControls(hwnd uintptr) {
 
 	gw.processLblHwnd = newLabel(hwnd, 12, 52, 240, 22, "ArcheAge: ○ Checking...")
 	gw.startBtnHwnd = newButton(hwnd, inst, 260, 48, 100, 28, "Start", ID_BUTTON_START)
-	gw.dumpBtnHwnd = newButton(hwnd, inst, 368, 48, 150, 28, "Dump Processes", ID_BUTTON_DUMP)
+	gw.clearLogBtnHwnd = newButton(hwnd, inst, 368, 48, 150, 28, "Clear Log", ID_BUTTON_CLEARLOG)
 	enableCtrl(gw.startBtnHwnd, false)
 	enableCtrl(gw.browseBtnHwnd, false)
 
@@ -674,7 +677,6 @@ func relaunchAsAdmin() {
 }
 
 func main() {
-
 	if !isElevated() {
 		relaunchAsAdmin()
 		return
@@ -723,7 +725,7 @@ func main() {
 	procShowWindow.Call(hwnd, SW_SHOWNORMAL)
 	procUpdateWindow.Call(hwnd)
 
-	logLine("ArcheAgent started. Waiting for ArcheAge process...")
+	logLine("ArcheAgent started. Waiting for archeage.exe process...")
 
 	var msg MSG
 	for {
