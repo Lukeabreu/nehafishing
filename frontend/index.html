@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NehaFishing</title>
+    <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+<div id="app">
+
+    <header>
+        <h1>🎣 NehaFishing</h1>
+        <div id="process-badge" class="badge badge-off">ArcheAge ○</div>
+    </header>
+
+    <section class="folder-row">
+        <button id="btn-pick" class="btn-pick">📂 Choose Folder…</button>
+        <button id="btn-explorer" title="Open in Explorer">🗁</button>
+    </section>
+
+    <!-- Folder info card — hidden until a folder is chosen -->
+    <div id="folder-card" class="folder-card hidden">
+        <div id="folder-path" class="folder-path"></div>
+        <div class="file-checks">
+            <span id="check-action" class="file-check">⬜ neha-fishing-actions.txt</span>
+            <span id="check-log"    class="file-check">⬜ neha-fishing-log.txt</span>
+        </div>
+    </div>
+
+    <div id="status-bar">No folder set</div>
+
+    <section class="log-section">
+        <div class="log-header">
+            <span>Debug log</span>
+            <button id="btn-clear">Clear</button>
+        </div>
+        <div id="log-box"></div>
+    </section>
+
+</div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

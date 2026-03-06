@@ -1,0 +1,11 @@
+{
+  "name": "nehafishing-frontend",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  }
+}
